@@ -2,11 +2,18 @@
 
 namespace App\Exceptions;
 
+use App\Http\Traits\ApiHandlerTrait;
 use App\Http\Traits\Helpers\ApiResponseTrait;
+use http\Client\Response;
+use HttpException;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\QueryException;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Foundation\Bus\DispatchesJobs;
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
+use Illuminate\Foundation\Validation\ValidatesRequests;
 use Illuminate\Http\Exceptions\PostTooLargeException;
 use Illuminate\Http\Exceptions\ThrottleRequestsException;
 use Illuminate\Validation\ValidationException;
@@ -14,6 +21,7 @@ use Throwable;
 
 class Handler extends ExceptionHandler
 {
+    use AuthorizesRequests, DispatchesJobs, ValidatesRequests, ApiHandlerTrait;
 
     /**
      * A list of the exception types that are not reported.
@@ -45,117 +53,53 @@ class Handler extends ExceptionHandler
      */
     public function report(Throwable $exception)
     {
-        $ignoreable_exception_messages = ['Unauthenticated or Token Expired, Please Login'];
-//        $ignoreable_exception_messages[] = 'The refresh token is invalid.';
-        $ignoreable_exception_messages[] = 'The resource owner or authorization server denied the request.';
-        if (app()->bound('sentry') && $this->shouldReport($exception)) {
-            if (!in_array($exception->getMessage(), $ignoreable_exception_messages)) {
-                app('sentry')->captureException($exception);
-            }
-        }
 
-        parent::report($exception);
     }
 
+
+
     /**
-     * Render an exception into an HTTP response.
+     * Register the exception handling callbacks for the application.
      *
-     * @param \Illuminate\Http\Request $request
-     * @param \Throwable $exception
-     *
-     * @return \Symfony\Component\HttpFoundation\Response
-     *
-     * @throws \Throwable
+     * @return void
      */
-    public function render($request, Throwable $exception)
+    public function register()
     {
 
-        if ($request->expectsJson()) {
-            if ($exception instanceof PostTooLargeException) {
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => "Size of attached file should be less " . ini_get("upload_max_filesize") . "B"
-                    ],
-                    400
-                );
-            }
+        $this->reportable(function (Throwable $e){
 
-            if ($exception instanceof AuthenticationException) {
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => 'Unauthenticated or Token Expired, Please Login'
-                    ],
-                    401
-                );
-            }
-            if ($exception instanceof ThrottleRequestsException) {
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => 'Too Many Requests,Please Slow Down'
-                    ],
-                    429
-                );
-            }
-            if ($exception instanceof ModelNotFoundException) {
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => 'Entry for ' . str_replace('App\\', '', $exception->getModel()) . ' not found'
-                    ],
-                    404
-                );
-            }
-            if ($exception instanceof ValidationException) {
+        });
 
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => $exception->getMessage(),
-                        'errors' => $exception->errors()
-                    ],
-                    422
-                );
-            }
-            if ($exception instanceof QueryException) {
+        $this->renderable(function (Throwable $e) {
+            return $this->handleException($e);
+        });
+    }
 
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => 'There was Issue with the Query',
-                        'exception' => $exception
-
-                    ],
-                    500
-                );
-            }
-            // if ($exception instanceof HttpResponseException) {
-            //     // $exception = $exception->getResponse();
-            //     return $this->apiResponse(
-            //         [
-            //             'success' => false,
-            //             'message' => "There was some internal error",
-            //             'exception'  => $exception
-            //         ],
-            //         500
-            //     );
-            // }
-            if ($exception instanceof \Error) {
-                // $exception = $exception->getResponse();
-                return $this->apiResponse(
-                    [
-                        'success' => false,
-                        'message' => "There was some internal error",
-                        'exception' => $exception
-                    ],
-                    500
-                );
+    public function handleException( Throwable $e){
+        if ($e instanceof HttpException) {
+            $code = $e->getStatusCode();
+            $defaultMessage = \Symfony\Component\HttpFoundation\Response::$statusTexts[$code];
+            $message = $e->getMessage() == "" ? $defaultMessage : $e->getMessage();
+            return $this->errorResponse($message, $code);
+        } else if ($e instanceof ModelNotFoundException) {
+            $model = strtolower(class_basename($e->getModel()));
+            return $this->errorResponse("Does not exist any instance of {$model} with the given id", Response::HTTP_NOT_FOUND);
+        } else if ($e instanceof AuthorizationException) {
+            return $this->errorResponse($e->getMessage(), Response::HTTP_FORBIDDEN);
+        } else if ($e instanceof TokenBlacklistedException) {
+            return $this->errorResponse($e->getMessage(), Response::HTTP_UNAUTHORIZED);
+        } else if ($e instanceof AuthenticationException) {
+            return $this->errorResponse($e->getMessage(), Response::HTTP_UNAUTHORIZED);
+        } else if ($e instanceof ValidationException) {
+            $errors = $e->validator->errors()->getMessages();
+            return $this->errorResponse($errors, Response::HTTP_UNPROCESSABLE_ENTITY);
+        } else {
+            if (config('app.debug'))
+                return $this->dataResponse($e->getMessage());
+            else {
+                return $this->errorResponse('Try later', Response::HTTP_INTERNAL_SERVER_ERROR);
             }
         }
 
-
-        return parent::render($request, $exception);
     }
 }
